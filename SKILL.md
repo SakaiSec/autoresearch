@@ -258,9 +258,19 @@ Git is used here for working-state control only. The experiment log and report a
 authoritative record of what was tried; they must remain complete regardless of what Git contains.
 Reverted trials must remain fully visible in the log.
 
-**Tie rule:** when a new trial matches the current best on the primary metric exactly, accept it
-and it becomes the new canonical best (most-recently-accepted wins). Both the prior best and the
-new trial are eligible for frontier membership under the cost/quality tradeoff criterion.
+**Tie rule:** tie comparison uses the same precision shown in logs and reports (i.e., the rounded
+or truncated value as written), so acceptance behavior matches what is auditable from the log.
+
+A tied trial — one whose reported primary metric value equals the current best at that precision
+— is accepted **only if** it also offers a meaningful improvement in at least one secondary cost
+characteristic: `runtime_sec`, `peak_vram_mb`, or `model_size_mb` (≥20% better than the current
+best on that dimension). The accepted tied trial becomes the new canonical best
+(most-recently-accepted wins) and is eligible for frontier membership under the cost/quality
+tradeoff criterion (criterion 2); it does not automatically satisfy criterion 1 unless it
+genuinely improves on the reported primary metric value.
+
+If there is no meaningful cost advantage, the tied trial is marked `rejected` — not `accepted` —
+and is not committed. This keeps the frontier from growing due to ties that offer no benefit.
 
 ### Frontier management
 
@@ -271,7 +281,8 @@ when the best model is too expensive to iterate on quickly.
 
 **Admission criteria.** An accepted trial joins the frontier if it satisfies at least one of:
 
-1. It is the current best on the primary metric (the most-recently-accepted trial among any ties).
+1. It holds the highest reported primary metric value among all accepted trials. When a tied trial
+   is accepted (per the tie rule), it becomes the current best and satisfies this criterion.
 2. It is within **2% relative degradation** of the current best on the primary metric *and*
    offers a **≥20% improvement** in at least one secondary metric (`runtime_sec`, `model_size_mb`,
    or `peak_vram_mb`) compared to every existing frontier member — i.e., it represents a tradeoff
@@ -379,12 +390,15 @@ Required fields:
 | `accepted` | `true` or `false`; empty for `frontier_eviction` rows |
 | `on_frontier` | `true` or `false`; must be `false` on `frontier_eviction` rows — never left blank |
 | `revert_reason` | Why the trial was not accepted, or why it was evicted from the frontier; empty for accepted trial rows |
-| `artifacts_path` | `experiment/trials/<trial_id>/` for `trial` rows; empty for `frontier_eviction` rows |
+| `artifacts_path` | Path to this trial's output directory; see Artifact directories below; empty for `frontier_eviction` rows |
 
-**Artifact directories.** Each trial's outputs must be saved to `experiment/trials/<trial_id>/`
-(e.g., `experiment/trials/trial-003/`). Store metrics, logs, checkpoints, and any debug artifacts
-there. This isolates each trial's outputs, makes individual trials easy to inspect and reproduce,
-and eliminates cross-trial file contamination.
+**Artifact directories.**
+- *Iterative runs:* each trial's outputs must be saved to `experiment/trials/<trial_id>/`
+  (e.g., `experiment/trials/trial-003/`). Set `artifacts_path` to that path. This isolates each
+  trial's outputs, makes individual trials easy to inspect and reproduce, and eliminates
+  cross-trial file contamination.
+- *Single-pass runs:* outputs go to `experiment/results/`. Set `artifacts_path=experiment/results/`
+  unless the run creates a dedicated subdirectory, in which case use that path instead.
 
 **Trial lineage rules:**
 - Every trial must have a unique, zero-padded `trial_id` assigned sequentially (`trial-001`,
@@ -396,6 +410,21 @@ and eliminates cross-trial file contamination.
   must not be used as parents.
 - Evicted trials remain in the log and retain their historical lineage links; they are no longer
   eligible as parents for new trials.
+
+**Single-pass field conventions.** Single-pass runs should still append a row to
+`experiment_log.tsv` so the file is a complete execution record. Use these values for
+fields that are otherwise iterative-specific:
+
+| Field | Value for single-pass runs |
+|---|---|
+| `trial_id` | `trial-001` (there is only one run) |
+| `parent_trial_id` | empty |
+| `event_type` | `trial` |
+| `mode` | `single_pass` |
+| `status` | `accepted` if the run completed; `crashed` or `timeout` otherwise |
+| `accepted` | `true` if the run completed successfully; `false` otherwise |
+| `on_frontier` | `false` (frontier is not used in single-pass mode) |
+| `artifacts_path` | `experiment/results/` |
 
 Log helper:
 
