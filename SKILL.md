@@ -9,6 +9,7 @@ description: >
   HuggingFace, model training, fine-tuning, loss curves, eval metrics, hyperparameter tuning, or
   running any kind of learning algorithm on a dataset. When in doubt, use this skill — it covers
   both classical approaches (scikit-learn) and deep learning.
+compatibility: Requires Git and uv. Works best with GPU available; falls back to CPU automatically.
 ---
 
 # autoresearch
@@ -18,6 +19,20 @@ description of a task, you: understand the problem, write clean runnable code, e
 results, and report findings — with minimal interruptions to the user.
 
 The workspace is always a Git repository. All experiment state management may rely on Git.
+
+---
+
+## Success Criteria
+
+**Quantitative**
+- Skill triggers on ≥90% of ML/training-related queries without explicit invocation
+- Single-pass workflows complete in ≤15 tool calls
+- Zero unhandled crashes per workflow (all failures are caught and logged)
+
+**Qualitative**
+- Users do not need to specify implementation details (model choice, data split, device) unless they want to
+- Reports are self-contained and actionable without follow-up questions
+- Iterative search stays within the agreed trial budget with no overruns
 
 ---
 
@@ -207,6 +222,31 @@ The "What to try next" section must be concrete and actionable — not generic a
 data", but specific things like "add a cosine LR schedule" or "freeze encoder layers 0–6 and only
 fine-tune the top 6".
 
+**Training curve PNG.** If the script records per-epoch loss or metrics, generate a training curve
+and embed it in the report. Save the plot to `experiment/results/training_curve.png` and reference
+it with a relative Markdown image tag.
+
+```python
+import matplotlib.pyplot as plt
+
+def save_training_curve(train_losses, val_losses, path="experiment/results/training_curve.png"):
+    import os; os.makedirs(os.path.dirname(path), exist_ok=True)
+    epochs = range(1, len(train_losses) + 1)
+    plt.figure()
+    plt.plot(epochs, train_losses, label="train loss")
+    if val_losses:
+        plt.plot(epochs, val_losses, label="val loss")
+    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend(); plt.tight_layout()
+    plt.savefig(path); plt.close()
+```
+
+In `report.md`, embed it directly after the "Training curve" section header:
+
+```markdown
+## Training curve
+![Training curve](training_curve.png)
+```
+
 ---
 
 ## Iterative trial discipline (Option B only)
@@ -274,48 +314,7 @@ and is not committed. This keeps the frontier from growing due to ties that offe
 
 ### Frontier management
 
-The **frontier** is the small set of accepted trials that remain valid parents for future
-exploration. It exists because the best trial on the primary metric is not always the only useful
-starting point: a faster or smaller model that is close in quality may be worth branching from
-when the best model is too expensive to iterate on quickly.
-
-**Admission criteria.** An accepted trial joins the frontier if it satisfies at least one of:
-
-1. It holds the highest reported primary metric value among all accepted trials. When a tied trial
-   is accepted (per the tie rule), it becomes the current best and satisfies this criterion.
-2. It is within **2% relative degradation** of the current best on the primary metric *and*
-   offers a **≥20% improvement** in at least one secondary metric (`runtime_sec`, `model_size_mb`,
-   or `peak_vram_mb`) compared to every existing frontier member — i.e., it represents a tradeoff
-   point not already covered.
-
-**Eviction.** Remove a trial from the frontier when a newer accepted trial dominates it: the newer
-trial is at least as good on the primary metric *and* at least as good on every secondary
-dimension that justified the dominated trial's membership. Evicted trials remain in the experiment
-log permanently and retain their historical lineage; they are simply no longer valid parents.
-
-**Size cap.** The frontier must not exceed **4 members**. Before adding a fifth, re-evaluate all
-current members for dominance and evict the weakest representative. In practice, one to three
-members is typical.
-
-**Using the frontier.** At the start of each new trial, choose the working base from the frontier.
-The default is the current primary-metric best (criterion 1). Branch from a cost/quality tradeoff
-member only when the experimental context specifically motivates it; record that member's
-`trial_id` as `parent_trial_id`.
-
-Frontier membership is tracked via the `on_frontier` field in the experiment log. Because TSV
-rows are append-only, record an eviction by appending a dedicated bookkeeping row:
-
-| Field | Value |
-|---|---|
-| `event_type` | `frontier_eviction` |
-| `trial_id` | `trial_id` of the evicted trial |
-| `on_frontier` | `false` |
-| `revert_reason` | brief reason for eviction (e.g., `dominated by trial-005 on val_f1 and runtime_sec`) |
-| all other fields | empty |
-
-Setting `on_frontier=false` on eviction rows (rather than leaving it blank) ensures a log reader
-can reconstruct the current frontier state deterministically by scanning `event_type=trial` rows
-for their most recent `on_frontier` value, then applying `frontier_eviction` rows in order.
+See `references/frontier-management.md` for details.
 
 ### Git commits for accepted trials
 
@@ -368,83 +367,7 @@ decisions. Useful secondary metrics include:
 
 ## Experiment log schema
 
-Every trial — accepted, rejected, crashed, and timed-out — must be appended to
-`experiment/results/experiment_log.tsv`. Omitting any trial is not permitted.
-
-Required fields:
-
-| Field | Description |
-|---|---|
-| `trial_id` | Zero-padded sequential identifier (e.g., `trial-001`, `trial-002`) |
-| `parent_trial_id` | `trial_id` of the frontier member this trial was derived from; empty for the initial baseline |
-| `event_type` | `trial` for normal trial rows; `frontier_eviction` for eviction bookkeeping rows |
-| `mode` | `single_pass` or `iterative` |
-| `hypothesis` | One-sentence statement of what this trial is testing |
-| `change_summary` | Brief description of what was changed relative to the parent |
-| `runtime_sec` | Measured wall-clock duration of the run |
-| `status` | `accepted`, `rejected`, `crashed`, or `timeout`; empty for bookkeeping rows |
-| `primary_metric` | Name of the acceptance metric (e.g., `val_f1`) |
-| `primary_metric_value` | Measured value; empty if the run did not complete |
-| `secondary_metrics` | JSON-encoded dict of additional metrics; `{}` if none |
-| `best_so_far` | Value of the primary metric in the current accepted working state after this trial |
-| `accepted` | `true` or `false`; empty for `frontier_eviction` rows |
-| `on_frontier` | `true` or `false`; must be `false` on `frontier_eviction` rows — never left blank |
-| `revert_reason` | Why the trial was not accepted, or why it was evicted from the frontier; empty for accepted trial rows |
-| `artifacts_path` | Path to this trial's output directory; see Artifact directories below; empty for `frontier_eviction` rows |
-
-**Artifact directories.**
-- *Iterative runs:* each trial's outputs must be saved to `experiment/trials/<trial_id>/`
-  (e.g., `experiment/trials/trial-003/`). Set `artifacts_path` to that path. This isolates each
-  trial's outputs, makes individual trials easy to inspect and reproduce, and eliminates
-  cross-trial file contamination.
-- *Single-pass runs:* outputs go to `experiment/results/`. Set `artifacts_path=experiment/results/`
-  unless the run creates a dedicated subdirectory, in which case use that path instead.
-
-**Trial lineage rules:**
-- Every trial must have a unique, zero-padded `trial_id` assigned sequentially (`trial-001`,
-  `trial-002`, …).
-- Every non-initial trial must record the `parent_trial_id` of the frontier member it was derived
-  from.
-- Only trials currently on the frontier may be used as `parent_trial_id` for new trials.
-- Rejected, crashed, and timed-out trials remain in the log but are never on the frontier and
-  must not be used as parents.
-- Evicted trials remain in the log and retain their historical lineage links; they are no longer
-  eligible as parents for new trials.
-
-**Single-pass field conventions.** Single-pass runs should still append a row to
-`experiment_log.tsv` so the file is a complete execution record. Use these values for
-fields that are otherwise iterative-specific:
-
-| Field | Value for single-pass runs |
-|---|---|
-| `trial_id` | `trial-001` (there is only one run) |
-| `parent_trial_id` | empty |
-| `event_type` | `trial` |
-| `mode` | `single_pass` |
-| `status` | `accepted` if the run completed; `crashed` or `timeout` otherwise |
-| `accepted` | `true` if the run completed successfully; `false` otherwise |
-| `on_frontier` | `false` (frontier is not used in single-pass mode) |
-| `artifacts_path` | `experiment/results/` |
-
-Log helper:
-
-```python
-import csv, json, os
-from datetime import datetime
-
-def log_trial(record: dict, path="experiment/results/experiment_log.tsv"):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    record = {"timestamp": datetime.now().isoformat(), **record}
-    write_header = not os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=record.keys(), delimiter="\t")
-        if write_header:
-            writer.writeheader()
-        writer.writerow(record)
-```
-
-Encode `secondary_metrics` as a JSON string before passing to the logger:
-`record["secondary_metrics"] = json.dumps({"peak_vram_mb": 4200, "model_size_mb": 438})`.
+See `references/experiment-log-schema.md` for details.
 
 ---
 
@@ -462,49 +385,7 @@ and `random.sample` over a param space for random search — no extra libraries 
 
 ## Fine-tuning HuggingFace models
 
-Use the `Trainer` API when fine-tuning transformer models — it handles device placement, gradient
-accumulation, evaluation loops, and checkpointing cleanly.
-
-Key patterns:
-```python
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
-from datasets import Dataset
-import evaluate
-
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-dataset = Dataset.from_pandas(df)
-tokenized = dataset.map(
-    lambda x: tokenizer(x["text"], truncation=True, padding="max_length", max_length=128),
-    batched=True
-)
-
-metric = evaluate.load("f1")
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    preds = logits.argmax(-1)
-    return metric.compute(predictions=preds, references=labels, average="weighted")
-
-args = TrainingArguments(
-    output_dir="experiment/checkpoints",
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    load_best_model_at_end=True,
-    metric_for_best_model="f1",
-    num_train_epochs=3,
-    per_device_train_batch_size=16,
-    learning_rate=2e-5,
-    warmup_ratio=0.1,
-    weight_decay=0.01,
-    logging_dir="experiment/logs",
-    report_to="none",       # don't require W&B
-)
-trainer = Trainer(
-    model=model, args=args,
-    train_dataset=tokenized_train, eval_dataset=tokenized_val,
-    compute_metrics=compute_metrics,
-)
-trainer.train()
-```
+See `references/huggingface-finetuning.md` for details.
 
 ---
 
@@ -549,7 +430,7 @@ For HuggingFace Trainer, leave `no_cuda=False` (default) and it handles placemen
 ```
 experiment/
 ├── train.py                         ← the complete training script
-├── trials/
+├── trials/                          ← iterative mode only: one subdirectory per trial
 │   ├── trial-001/                   ← per-trial artifact directory
 │   │   ├── metrics.json
 │   │   ├── run_config.json
@@ -557,14 +438,18 @@ experiment/
 │   │   └── logs/
 │   ├── trial-002/
 │   └── ...
-├── results/
+├── results/                         ← always present in both modes
 │   ├── experiment_log.tsv           ← all trials; full schema including lineage fields
-│   └── report.md                    ← human-readable report with analysis
+│   ├── report.md                    ← human-readable report with analysis
+│   ├── training_curve.png           ← generated plot (if applicable)
+│   ├── metrics.json                 ← single-pass only
+│   └── run_config.json              ← single-pass only
 └── data/                            ← derived/preprocessed data (if applicable)
 ```
 
-Single-pass runs may write directly to `experiment/results/` and `experiment/checkpoints/`
-without the `trials/` subdirectory structure.
+In iterative mode, per-trial outputs go under `trials/<trial_id>/`; `experiment_log.tsv` and
+`report.md` always live in `results/` regardless of mode. Single-pass runs write `metrics.json`
+and `run_config.json` directly to `results/` rather than a trial subdirectory.
 
 ---
 
