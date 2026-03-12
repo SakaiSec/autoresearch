@@ -93,4 +93,4 @@ Detailed reference material lives in [`references/`](references/):
 
 ## Original Repository
 
-This skill is based on [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+This skill is inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
