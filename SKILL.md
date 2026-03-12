@@ -38,6 +38,47 @@ make reasonable assumptions and proceed.
 
 ---
 
+## Execution path: single-pass or iterative
+
+Most requests are straightforward: write a script, run it once, report results. Proceed directly
+to the workflow for those.
+
+Before writing any code, check whether the request has any of these characteristics:
+
+- **Multi-stage pipeline composition** — e.g., preprocessing → feature extraction → alignment →
+  model training as distinct coupled stages, any of which could fail or need redesign
+- **Implicit or explicit iterative optimization** — language like "search", "optimize", "tune",
+  "align", "scan and train", or "keep improving until…"
+- **Unclear stopping condition or evaluation budget** — no fixed epoch count, no explicit trial
+  limit, no stated compute ceiling
+- **Ontology mapping, label generation, or taxonomy alignment** — e.g., mapping raw events to
+  MITRE ATT&CK tactics/techniques, aligning cluster labels to a schema, generating pseudo-labels
+  iteratively
+- **Potentially high compute cost or combinatorial growth** — large dataset × many model variants,
+  or a search space that could silently expand to dozens of runs
+
+
+If one or more criteria apply, stop and ask this question **once**, exactly as written, before
+proceeding:
+
+> **Before I begin:** this looks like it could go in two directions — I want to make sure I use
+> your compute budget well.
+>
+> **Option A — Single pass:** I implement one well-reasoned pipeline end-to-end, run it, and
+> deliver a full report with results and next-step recommendations. Clean, bounded, reproducible.
+>
+> **Option B — Iterative search:** I run multiple trials, each testing one hypothesis or
+> configuration change. I keep only changes that improve the validation metric and revert the rest
+> (though all trials are logged). We agree on a trial budget and a per-trial time limit upfront.
+>
+> Which would you prefer, and are there any compute or time constraints I should know about?
+
+Do not ask this question for ordinary, well-scoped training tasks (e.g., "train a sentiment
+classifier on this CSV"). The default for ambiguous requests that trigger the gate but receive no
+explicit user preference is **Option A** — a single, well-reasoned pass.
+
+---
+
 ## Workflow
 
 ### 1. Inspect the data
@@ -79,7 +120,6 @@ Use `uv` for all Python execution and dependency management — never bare `pyth
 
 **Setting up the environment:**
 ```bash
-# Create a virtual environment and install dependencies in one step
 uv venv experiment/.venv
 uv pip install --python experiment/.venv torch tqdm numpy scikit-learn
 # Add more packages as needed, e.g.:
@@ -89,8 +129,6 @@ uv pip install --python experiment/.venv transformers datasets evaluate accelera
 **Running the script:**
 ```bash
 uv run --python experiment/.venv python experiment/train.py
-# or equivalently, after activating:
-uv run python experiment/train.py
 ```
 
 **Adding a missing package mid-run:**
@@ -98,15 +136,21 @@ uv run python experiment/train.py
 uv pip install --python experiment/.venv <package-name>
 ```
 
-Use `uv run` every time you execute Python — never call `python` or `python3` directly, and never use `pip install`.
+Use `uv run` every time you execute Python — never call `python` or `python3` directly, and never
+use `pip install`.
 
-Execute `uv run python experiment/train.py` and capture output. If it fails:
-- Read the full traceback carefully
-- Fix the root cause (don't just retry blind)
-- Explain what you fixed in one sentence
+**Crash handling:** if a run fails, read the full traceback and attempt up to **three** targeted
+fixes for obvious causes (wrong dtype, missing package, shape mismatch, etc.). If the run is still
+failing after three attempts, log the trial as `crashed` in `experiment_log.tsv` with the error
+summary, then stop and report — do not loop indefinitely on a broken configuration.
 
-If training is taking longer than expected with no visible progress, verify the script isn't stuck
-(e.g., infinite data loop, deadlocked DataLoader worker).
+**Wall-clock budget:** every run must have an implicit or explicit time ceiling. For single-pass
+runs, flag to the user if training has produced no output after 10 minutes. For iterative trials,
+enforce the per-trial time limit agreed with the user; a trial that exceeds its budget is treated
+as a failure — log it and move on rather than waiting for it to finish.
+
+If training is taking longer than expected with no visible progress, check that the script isn't
+stuck (e.g., infinite data loop, deadlocked DataLoader worker) before assuming it's just slow.
 
 ### 5. Report results
 
@@ -137,9 +181,43 @@ After the run, write `experiment/results/report.md`:
 3. [concrete suggestion with rationale]
 ```
 
-The "What to try next" section should be concrete and actionable — not generic advice like
-"try more data", but specific things like "add a cosine LR schedule" or "freeze encoder
-layers 0–6 and only fine-tune the top 6".
+The "What to try next" section must be concrete and actionable — not generic advice like "try more
+data", but specific things like "add a cosine LR schedule" or "freeze encoder layers 0–6 and only
+fine-tune the top 6".
+
+---
+
+## Iterative trial discipline (Option B only)
+
+When the user has chosen iterative search, execute it as a sequence of bounded, discrete trials.
+
+**One trial = one hypothesis.** Each trial tests exactly one change or configuration variant
+(e.g., a different learning rate, a new feature, an architectural modification). Do not bundle
+multiple independent changes into a single trial — that makes it impossible to attribute the
+result.
+
+**One run per trial.** Execute the trial once against the agreed configuration. Do not silently
+re-run on failure unless it falls within the crash-handling budget (see §4).
+
+**One evaluation decision per trial.** After the run completes (or fails), compare the primary
+validation metric against the current best. The decision rule is binary:
+
+- **Improved:** adopt the change as the new working state and record it as `accepted` in the log.
+- **Did not improve or crashed:** revert the code change so the working state stays at the last
+  accepted configuration. Record the trial as `rejected` or `crashed` in the log regardless —
+  failed trials must appear in the audit trail.
+
+"Revert" means restoring the working files to match the last accepted state. The implementation
+may use file copies, version control, or any other mechanism — the constraint is on the logic, not
+the tooling.
+
+**Per-trial time limit.** Before starting iterative search, confirm a wall-clock budget per trial
+with the user (e.g., "5 minutes per trial, up to 10 trials"). A trial that exceeds its time limit
+is treated as a failure: log it as `timeout` and revert.
+
+**Stopping condition.** Iterative search must have an explicit stopping condition agreed before it
+starts: a maximum number of trials, a target metric threshold, or a total wall-clock budget. Do
+not run open-ended loops. When the stopping condition is reached, write the final report and stop.
 
 ---
 
@@ -150,7 +228,7 @@ improvement), run a small grid or random search:
 
 - Default to ≤12 configs unless the user asks for more
 - Run each config sequentially (or in subprocesses if the jobs are fast)
-- Log every run to `experiment/results/experiment_log.csv` (see Experiment Tracking below)
+- Log every run to `experiment/results/experiment_log.tsv`
 - At the end, print a table ranked by validation metric and highlight the winner
 - Optionally retrain the winner for the full number of epochs
 
@@ -257,8 +335,9 @@ def log_experiment(config: dict, metrics: dict, path="experiment/results/experim
         writer.writerow(row)
 ```
 
-Call this at the end of every training run. For hyperparameter searches, this naturally
-builds a sortable table of all configs and their results.
+Every trial must be logged — accepted, rejected, crashed, and timed-out alike. The log is the
+audit trail; omitting a trial is not permitted. Include a `status` field (`accepted`, `rejected`,
+`crashed`, `timeout`) and a brief `notes` field explaining why the trial was accepted or rejected.
 
 ---
 
@@ -283,10 +362,12 @@ experiment/
 ├── results/
 │   ├── metrics.json            ← {"accuracy": 0.87, "f1": 0.86, ...}
 │   ├── run_config.json         ← exact hyperparameters used
-│   ├── experiment_log.tsv      ← all runs (useful for hyperparameter search)
+│   ├── experiment_log.tsv      ← all runs; includes status and notes columns
 │   └── report.md               ← human-readable report with analysis
 └── data/                       ← derived/preprocessed data (if applicable)
 ```
+
+---
 
 ## Quality standards
 
@@ -294,4 +375,6 @@ experiment/
 - **Do not hallucinate data.** If a data file doesn't exist or is unreadable, say so clearly.
 - **Do not fake results.** Run the actual training. If hardware prevents it, say so explicitly.
 - **Do not write placeholder code.** Every function must be complete.
+- **Do not run indefinitely.** Every execution path must be bounded by an explicit stopping
+  condition, trial budget, or wall-clock limit.
 - Scripts must be importable (use `if __name__ == "__main__":`) so users can extend them.
