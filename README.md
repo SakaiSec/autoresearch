@@ -1,6 +1,6 @@
 # autoresearch
 
-A Claude Code skill that runs machine learning and deep learning experiments end-to-end. Describe a task in plain English — the skill designs the pipeline, writes the code, executes it, tracks every trial, and delivers an actionable report.
+A skill that runs machine learning and deep learning experiments end-to-end. Describe a task in plain English — the skill designs the pipeline, writes the code, executes it, tracks every trial, and delivers an actionable report.
 
 ## What it does
 
@@ -20,10 +20,8 @@ Given a request like *"train a sentiment classifier on this CSV"* or *"fine-tune
 
 ## Installation
 
-Copy or symlink this directory into your Claude Code skills folder:
-
 ```bash
-ln -s /path/to/autoresearch ~/.agents/skills/autoresearch
+bunx skills add https://github.com/SakaiSec/autoresearch
 ```
 
 ## Triggering the skill
