@@ -227,7 +227,8 @@ A **trial** is exactly:
 ### Accept / revert logic
 
 - **Accepted:** the primary metric improved. Commit the working-state changes to the experiment
-  branch (see Git commits below) and record the trial as `accepted` in the log.
+  branch (see Git commits below), record the trial as `accepted` in the log, and evaluate whether
+  it should join the frontier (see Frontier management below).
 - **Rejected:** the primary metric did not improve. Use `git checkout -- .` (or equivalent) to
   restore the working tree to the last accepted commit. Record the trial as `rejected` in the log.
 - **Crashed / timed out:** restore the working tree as above. Record the trial as `crashed` or
@@ -236,6 +237,41 @@ A **trial** is exactly:
 Git is used here for working-state control only. The experiment log and report artifacts are the
 authoritative record of what was tried; they must remain complete regardless of what Git contains.
 Reverted trials must remain fully visible in the log.
+
+### Frontier management
+
+The **frontier** is the small set of accepted trials that remain valid starting points for future
+exploration. It exists because the globally best trial on the primary metric is not always the
+only useful parent: a cheaper model that scores slightly lower may be worth branching from if the
+best model is too slow or too large to iterate on quickly.
+
+**Membership rules:**
+
+- A trial is on the frontier if it satisfies at least one of:
+  1. It is the current best on the primary metric (there is always exactly one such trial).
+  2. It offers a materially distinct cost/quality tradeoff — e.g., it is significantly faster or
+     smaller than the current best while remaining within an acceptable range of the primary metric.
+     "Materially distinct" requires a meaningful difference in at least one secondary metric
+     (e.g., ≥20% reduction in `runtime_sec` or `model_size_mb`) that is not already represented
+     by another frontier member.
+
+- A trial must be removed from the frontier when a newer accepted trial dominates it — i.e., when
+  a newer trial is at least as good on the primary metric *and* at least as good on every secondary
+  dimension that justified the dominated trial's frontier membership. A dominated trial must stay
+  in the experiment log and remains a valid historical parent; it simply cannot be chosen as the
+  working base for new trials.
+
+- Keep the frontier small. In practice, one to three members is typical. If the frontier would
+  exceed five members, re-evaluate for dominance before adding.
+
+**Using the frontier:** at the start of each new iterative trial, the working base is chosen from
+the frontier. The default is the current primary-metric best. If the user or the experimental
+context suggests exploring a cost/quality tradeoff, branch from a different frontier member
+instead and record that member's `trial_id` as `parent_trial_id`.
+
+Add an `on_frontier` boolean field to each log row and update it whenever frontier membership
+changes. Because TSV rows are append-only, record frontier changes as a separate bookkeeping row
+with `mode=frontier_update`, `trial_id` of the affected trial, and the reason in `revert_reason`.
 
 ### Git commits for accepted trials
 
@@ -306,16 +342,19 @@ Required fields:
 | `secondary_metrics` | JSON-encoded dict of additional metrics; `{}` if none |
 | `best_so_far` | Value of the primary metric in the current accepted working state after this trial |
 | `accepted` | `true` or `false` |
-| `revert_reason` | Why the trial was not accepted; empty for accepted trials |
+| `on_frontier` | `true` if this trial is currently on the frontier; `false` otherwise |
+| `revert_reason` | Why the trial was not accepted, or why it was removed from the frontier; empty otherwise |
 | `artifacts_path` | Relative path to this trial's output directory |
 
 **Trial lineage rules:**
 - Every trial must have a unique `trial_id`.
 - Every non-initial trial must record the `parent_trial_id` of the accepted working state it was
   derived from.
-- Accepted trials become valid parents for future trials.
-- Rejected, crashed, and timed-out trials remain in the log but do not become the working baseline
-  and must not be used as a `parent_trial_id` for subsequent trials.
+- Only trials currently on the frontier may be used as `parent_trial_id` for new trials.
+- Rejected, crashed, and timed-out trials remain in the log but are never on the frontier and
+  must not be used as parents.
+- Trials removed from the frontier remain in the log and retain their historical `parent_trial_id`
+  links; they are simply no longer eligible as working bases for future trials.
 
 Log helper:
 
