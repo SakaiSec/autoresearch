@@ -226,17 +226,33 @@ A **trial** is exactly:
 
 ### Accept / revert logic
 
-- **Accepted:** the primary metric improved (see tie rule below). Commit the working-state changes
-  to the experiment branch (see Git commits below), record the trial as `accepted` in the log,
-  and update the frontier (see Frontier management below).
-- **Rejected:** the primary metric did not improve. Restore the workspace with
-  `git reset --hard HEAD` followed by `git clean -fd` to return to the last accepted commit and
-  remove any untracked files left by the trial. Record the trial as `rejected` in the log.
-- **Crashed / timed out:** restore the workspace with `git reset --hard HEAD` and `git clean -fd`
-  as above. Record the trial as `crashed` or `timeout` in the log.
+In iterative mode, `HEAD` always points to the last accepted commit. Rejected, crashed, and
+timed-out trials are **never committed**, so `HEAD` never advances past an accepted state.
+Restore operations therefore always return the workspace to the last accepted state.
 
-The hard reset + clean is required after every non-accepted trial. Its purpose is to prevent
-artifacts, partial outputs, or changed files from one trial leaking into the next.
+- **Accepted:** the primary metric improved (see tie rule below). Commit the working-state changes
+  to the experiment branch — this advances `HEAD` to the new accepted state. Record the trial as
+  `accepted` in the log and update the frontier (see Frontier management below).
+- **Rejected:** the primary metric did not improve. The trial is not committed. Restore the
+  workspace to the last accepted commit (`HEAD`) with:
+  ```bash
+  git reset --hard HEAD
+  git clean -fd
+  ```
+  Record the trial as `rejected` in the log.
+- **Crashed / timed out:** the trial is not committed. Restore the workspace to the last accepted
+  commit (`HEAD`) with the same commands:
+  ```bash
+  git reset --hard HEAD
+  git clean -fd
+  ```
+  Record the trial as `crashed` or `timeout` in the log.
+
+The `git reset --hard HEAD && git clean -fd` sequence is required after every non-accepted trial.
+`git reset --hard HEAD` restores all tracked files to the last accepted commit; `git clean -fd`
+removes any untracked files and directories written during the trial. Together they guarantee a
+clean slate before the next trial begins, with no artifacts from the failed attempt leaking
+forward.
 
 Git is used here for working-state control only. The experiment log and report artifacts are the
 authoritative record of what was tried; they must remain complete regardless of what Git contains.
@@ -276,9 +292,19 @@ member only when the experimental context specifically motivates it; record that
 `trial_id` as `parent_trial_id`.
 
 Frontier membership is tracked via the `on_frontier` field in the experiment log. Because TSV
-rows are append-only, record an eviction by appending a row with `event_type=frontier_eviction`,
-the `trial_id` of the evicted trial, and the reason in `revert_reason`. All other fields for
-eviction rows may be left empty.
+rows are append-only, record an eviction by appending a dedicated bookkeeping row:
+
+| Field | Value |
+|---|---|
+| `event_type` | `frontier_eviction` |
+| `trial_id` | `trial_id` of the evicted trial |
+| `on_frontier` | `false` |
+| `revert_reason` | brief reason for eviction (e.g., `dominated by trial-005 on val_f1 and runtime_sec`) |
+| all other fields | empty |
+
+Setting `on_frontier=false` on eviction rows (rather than leaving it blank) ensures a log reader
+can reconstruct the current frontier state deterministically by scanning `event_type=trial` rows
+for their most recent `on_frontier` value, then applying `frontier_eviction` rows in order.
 
 ### Git commits for accepted trials
 
@@ -292,8 +318,8 @@ git commit -m "trial-001: <short description> [<metric>=<value> +<delta>]"
 Example: `trial-003: add cosine LR schedule [val_f1=0.847 +0.012]`
 
 Include the zero-padded trial identifier, a one-line description of the change, and the primary
-metric value with its delta from the previous best. Do not commit rejected, crashed, or
-timed-out trials.
+metric value with its delta from the previous best. Do not commit rejected, crashed, or timed-out
+trials — only accepted trials advance `HEAD`.
 
 ### Per-trial time limit
 
@@ -350,10 +376,10 @@ Required fields:
 | `primary_metric_value` | Measured value; empty if the run did not complete |
 | `secondary_metrics` | JSON-encoded dict of additional metrics; `{}` if none |
 | `best_so_far` | Value of the primary metric in the current accepted working state after this trial |
-| `accepted` | `true` or `false`; empty for bookkeeping rows |
-| `on_frontier` | `true` if this trial is currently on the frontier; `false` otherwise |
-| `revert_reason` | Why the trial was not accepted, or why it was evicted from the frontier; empty otherwise |
-| `artifacts_path` | `experiment/trials/<trial_id>/` for trial rows; empty for bookkeeping rows |
+| `accepted` | `true` or `false`; empty for `frontier_eviction` rows |
+| `on_frontier` | `true` or `false`; must be `false` on `frontier_eviction` rows — never left blank |
+| `revert_reason` | Why the trial was not accepted, or why it was evicted from the frontier; empty for accepted trial rows |
+| `artifacts_path` | `experiment/trials/<trial_id>/` for `trial` rows; empty for `frontier_eviction` rows |
 
 **Artifact directories.** Each trial's outputs must be saved to `experiment/trials/<trial_id>/`
 (e.g., `experiment/trials/trial-003/`). Store metrics, logs, checkpoints, and any debug artifacts
@@ -450,11 +476,6 @@ trainer = Trainer(
 )
 trainer.train()
 ```
-
-**Model size guidance:**
-- < 10K examples → DistilBERT (`distilbert-base-uncased`)
-- < 100K examples → BERT-base (`bert-base-uncased`)
-- Larger / multilingual → ask the user, or default to `roberta-base`
 
 ---
 
