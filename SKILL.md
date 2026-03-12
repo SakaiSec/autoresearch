@@ -103,10 +103,10 @@ is **Option A** — a single, well-reasoned pass.
 At the start of every experiment session, create and check out a dedicated branch:
 
 ```bash
-git checkout -b experiments/YYYYMMDD-<task>
+git checkout -b experiments/<YYYYMMDD>-<task>
 ```
 
-- `YYYYMMDD` is today's date in that exact format (e.g., `20260312`).
+- `<YYYYMMDD>` is today's date in that exact format (e.g., `20260312`).
 - `<task>` is a short lowercase slug derived from the user request
   (e.g., `image-classifier`, `iris-classifier`, `sentiment-finetune`).
 - Branch off `main` (or the current default branch) unless the user specifies otherwise.
@@ -158,9 +158,9 @@ Use `uv` for all Python execution and dependency management — never bare `pyth
 **Setting up the environment:**
 ```bash
 uv venv experiment/.venv
-uv pip install --python experiment/.venv torch tqdm numpy scikit-learn
+uv pip install --python experiment/.venv transformers datasets
 # Add more packages as needed, e.g.:
-uv pip install --python experiment/.venv transformers datasets evaluate accelerate
+uv pip install --python experiment/.venv torch numpy scikit-learn evaluate accelerate huggingface unsloth flash-attn-4 flash-linear-attention
 ```
 
 **Running the script:**
@@ -314,7 +314,7 @@ and is not committed. This keeps the frontier from growing due to ties that offe
 
 ### Frontier management
 
-See `references/frontier-management.md` for details.
+See [frontier-management.md](references/frontier-management.md) for details.
 
 ### Git commits for accepted trials
 
@@ -367,7 +367,7 @@ decisions. Useful secondary metrics include:
 
 ## Experiment log schema
 
-See `references/experiment-log-schema.md` for details.
+See [experiment-log-schema.md](references/experiment-log-schema.md) for details.
 
 ---
 
@@ -385,7 +385,7 @@ and `random.sample` over a param space for random search — no extra libraries 
 
 ## Fine-tuning HuggingFace models
 
-See `references/huggingface-finetuning.md` for details.
+See [huggingface-finetuning.md](references/huggingface-finetuning.md) for details.
 
 ---
 
