@@ -226,52 +226,59 @@ A **trial** is exactly:
 
 ### Accept / revert logic
 
-- **Accepted:** the primary metric improved. Commit the working-state changes to the experiment
-  branch (see Git commits below), record the trial as `accepted` in the log, and evaluate whether
-  it should join the frontier (see Frontier management below).
-- **Rejected:** the primary metric did not improve. Use `git checkout -- .` (or equivalent) to
-  restore the working tree to the last accepted commit. Record the trial as `rejected` in the log.
-- **Crashed / timed out:** restore the working tree as above. Record the trial as `crashed` or
-  `timeout` in the log.
+- **Accepted:** the primary metric improved (see tie rule below). Commit the working-state changes
+  to the experiment branch (see Git commits below), record the trial as `accepted` in the log,
+  and update the frontier (see Frontier management below).
+- **Rejected:** the primary metric did not improve. Restore the workspace with
+  `git reset --hard HEAD` followed by `git clean -fd` to return to the last accepted commit and
+  remove any untracked files left by the trial. Record the trial as `rejected` in the log.
+- **Crashed / timed out:** restore the workspace with `git reset --hard HEAD` and `git clean -fd`
+  as above. Record the trial as `crashed` or `timeout` in the log.
+
+The hard reset + clean is required after every non-accepted trial. Its purpose is to prevent
+artifacts, partial outputs, or changed files from one trial leaking into the next.
 
 Git is used here for working-state control only. The experiment log and report artifacts are the
 authoritative record of what was tried; they must remain complete regardless of what Git contains.
 Reverted trials must remain fully visible in the log.
 
+**Tie rule:** when a new trial matches the current best on the primary metric exactly, accept it
+and it becomes the new canonical best (most-recently-accepted wins). Both the prior best and the
+new trial are eligible for frontier membership under the cost/quality tradeoff criterion.
+
 ### Frontier management
 
-The **frontier** is the small set of accepted trials that remain valid starting points for future
-exploration. It exists because the globally best trial on the primary metric is not always the
-only useful parent: a cheaper model that scores slightly lower may be worth branching from if the
-best model is too slow or too large to iterate on quickly.
+The **frontier** is the small set of accepted trials that remain valid parents for future
+exploration. It exists because the best trial on the primary metric is not always the only useful
+starting point: a faster or smaller model that is close in quality may be worth branching from
+when the best model is too expensive to iterate on quickly.
 
-**Membership rules:**
+**Admission criteria.** An accepted trial joins the frontier if it satisfies at least one of:
 
-- A trial is on the frontier if it satisfies at least one of:
-  1. It is the current best on the primary metric (there is always exactly one such trial).
-  2. It offers a materially distinct cost/quality tradeoff — e.g., it is significantly faster or
-     smaller than the current best while remaining within an acceptable range of the primary metric.
-     "Materially distinct" requires a meaningful difference in at least one secondary metric
-     (e.g., ≥20% reduction in `runtime_sec` or `model_size_mb`) that is not already represented
-     by another frontier member.
+1. It is the current best on the primary metric (the most-recently-accepted trial among any ties).
+2. It is within **2% relative degradation** of the current best on the primary metric *and*
+   offers a **≥20% improvement** in at least one secondary metric (`runtime_sec`, `model_size_mb`,
+   or `peak_vram_mb`) compared to every existing frontier member — i.e., it represents a tradeoff
+   point not already covered.
 
-- A trial must be removed from the frontier when a newer accepted trial dominates it — i.e., when
-  a newer trial is at least as good on the primary metric *and* at least as good on every secondary
-  dimension that justified the dominated trial's frontier membership. A dominated trial must stay
-  in the experiment log and remains a valid historical parent; it simply cannot be chosen as the
-  working base for new trials.
+**Eviction.** Remove a trial from the frontier when a newer accepted trial dominates it: the newer
+trial is at least as good on the primary metric *and* at least as good on every secondary
+dimension that justified the dominated trial's membership. Evicted trials remain in the experiment
+log permanently and retain their historical lineage; they are simply no longer valid parents.
 
-- Keep the frontier small. In practice, one to three members is typical. If the frontier would
-  exceed five members, re-evaluate for dominance before adding.
+**Size cap.** The frontier must not exceed **4 members**. Before adding a fifth, re-evaluate all
+current members for dominance and evict the weakest representative. In practice, one to three
+members is typical.
 
-**Using the frontier:** at the start of each new iterative trial, the working base is chosen from
-the frontier. The default is the current primary-metric best. If the user or the experimental
-context suggests exploring a cost/quality tradeoff, branch from a different frontier member
-instead and record that member's `trial_id` as `parent_trial_id`.
+**Using the frontier.** At the start of each new trial, choose the working base from the frontier.
+The default is the current primary-metric best (criterion 1). Branch from a cost/quality tradeoff
+member only when the experimental context specifically motivates it; record that member's
+`trial_id` as `parent_trial_id`.
 
-Add an `on_frontier` boolean field to each log row and update it whenever frontier membership
-changes. Because TSV rows are append-only, record frontier changes as a separate bookkeeping row
-with `mode=frontier_update`, `trial_id` of the affected trial, and the reason in `revert_reason`.
+Frontier membership is tracked via the `on_frontier` field in the experiment log. Because TSV
+rows are append-only, record an eviction by appending a row with `event_type=frontier_eviction`,
+the `trial_id` of the evicted trial, and the reason in `revert_reason`. All other fields for
+eviction rows may be left empty.
 
 ### Git commits for accepted trials
 
@@ -279,13 +286,14 @@ Each accepted trial must produce a commit on the experiment branch:
 
 ```bash
 git add experiment/
-git commit -m "trial-<N>: <short description> [<metric>=<value>]"
+git commit -m "trial-001: <short description> [<metric>=<value> +<delta>]"
 ```
 
-Example: `trial-3: add cosine LR schedule [val_f1=0.847 +0.012]`
+Example: `trial-003: add cosine LR schedule [val_f1=0.847 +0.012]`
 
-Include the trial identifier, a one-line description of the change, and the primary metric value
-with its delta from the previous best. Do not commit rejected, crashed, or timed-out trials.
+Include the zero-padded trial identifier, a one-line description of the change, and the primary
+metric value with its delta from the previous best. Do not commit rejected, crashed, or
+timed-out trials.
 
 ### Per-trial time limit
 
@@ -330,31 +338,38 @@ Required fields:
 
 | Field | Description |
 |---|---|
-| `trial_id` | Unique identifier for this trial (e.g., `trial-1`, `trial-2`) |
-| `parent_trial_id` | `trial_id` of the accepted working state this trial was derived from; empty for the initial baseline |
+| `trial_id` | Zero-padded sequential identifier (e.g., `trial-001`, `trial-002`) |
+| `parent_trial_id` | `trial_id` of the frontier member this trial was derived from; empty for the initial baseline |
+| `event_type` | `trial` for normal trial rows; `frontier_eviction` for eviction bookkeeping rows |
 | `mode` | `single_pass` or `iterative` |
 | `hypothesis` | One-sentence statement of what this trial is testing |
 | `change_summary` | Brief description of what was changed relative to the parent |
 | `runtime_sec` | Measured wall-clock duration of the run |
-| `status` | `accepted`, `rejected`, `crashed`, or `timeout` |
+| `status` | `accepted`, `rejected`, `crashed`, or `timeout`; empty for bookkeeping rows |
 | `primary_metric` | Name of the acceptance metric (e.g., `val_f1`) |
 | `primary_metric_value` | Measured value; empty if the run did not complete |
 | `secondary_metrics` | JSON-encoded dict of additional metrics; `{}` if none |
 | `best_so_far` | Value of the primary metric in the current accepted working state after this trial |
-| `accepted` | `true` or `false` |
+| `accepted` | `true` or `false`; empty for bookkeeping rows |
 | `on_frontier` | `true` if this trial is currently on the frontier; `false` otherwise |
-| `revert_reason` | Why the trial was not accepted, or why it was removed from the frontier; empty otherwise |
-| `artifacts_path` | Relative path to this trial's output directory |
+| `revert_reason` | Why the trial was not accepted, or why it was evicted from the frontier; empty otherwise |
+| `artifacts_path` | `experiment/trials/<trial_id>/` for trial rows; empty for bookkeeping rows |
+
+**Artifact directories.** Each trial's outputs must be saved to `experiment/trials/<trial_id>/`
+(e.g., `experiment/trials/trial-003/`). Store metrics, logs, checkpoints, and any debug artifacts
+there. This isolates each trial's outputs, makes individual trials easy to inspect and reproduce,
+and eliminates cross-trial file contamination.
 
 **Trial lineage rules:**
-- Every trial must have a unique `trial_id`.
-- Every non-initial trial must record the `parent_trial_id` of the accepted working state it was
-  derived from.
+- Every trial must have a unique, zero-padded `trial_id` assigned sequentially (`trial-001`,
+  `trial-002`, …).
+- Every non-initial trial must record the `parent_trial_id` of the frontier member it was derived
+  from.
 - Only trials currently on the frontier may be used as `parent_trial_id` for new trials.
 - Rejected, crashed, and timed-out trials remain in the log but are never on the frontier and
   must not be used as parents.
-- Trials removed from the frontier remain in the log and retain their historical `parent_trial_id`
-  links; they are simply no longer eligible as working bases for future trials.
+- Evicted trials remain in the log and retain their historical lineage links; they are no longer
+  eligible as parents for new trials.
 
 Log helper:
 
@@ -483,16 +498,23 @@ For HuggingFace Trainer, leave `no_cuda=False` (default) and it handles placemen
 
 ```
 experiment/
-├── train.py                    ← the complete training script
-├── checkpoints/
-│   └── best_model/             ← saved weights at best val metric
+├── train.py                         ← the complete training script
+├── trials/
+│   ├── trial-001/                   ← per-trial artifact directory
+│   │   ├── metrics.json
+│   │   ├── run_config.json
+│   │   ├── checkpoints/
+│   │   └── logs/
+│   ├── trial-002/
+│   └── ...
 ├── results/
-│   ├── metrics.json            ← {"accuracy": 0.87, "f1": 0.86, ...}
-│   ├── run_config.json         ← exact hyperparameters used
-│   ├── experiment_log.tsv      ← all trials; full schema including lineage fields
-│   └── report.md               ← human-readable report with analysis
-└── data/                       ← derived/preprocessed data (if applicable)
+│   ├── experiment_log.tsv           ← all trials; full schema including lineage fields
+│   └── report.md                    ← human-readable report with analysis
+└── data/                            ← derived/preprocessed data (if applicable)
 ```
+
+Single-pass runs may write directly to `experiment/results/` and `experiment/checkpoints/`
+without the `trials/` subdirectory structure.
 
 ---
 
