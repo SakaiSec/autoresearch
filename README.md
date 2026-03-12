@@ -21,7 +21,7 @@ Given a request like *"train a sentiment classifier on this CSV"* or *"fine-tune
 ## Installation
 
 ```bash
-bunx skills add https://github.com/SakaiSec/autoresearch
+bunx skills add SakaiSec/autoresearch
 ```
 
 ## Triggering the skill
