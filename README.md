@@ -1,4 +1,4 @@
-# autoresearch
+# autoresearch (Skills version)
 
 A skill that runs machine learning and deep learning experiments end-to-end. Describe a task in plain English — the skill designs the pipeline, writes the code, executes it, tracks every trial, and delivers an actionable report.
 
@@ -17,6 +17,20 @@ Given a request like *"train a sentiment classifier on this CSV"* or *"fine-tune
 - Git (workspace must be a Git repository)
 - [uv](https://github.com/astral-sh/uv) for Python environment management
 - GPU recommended; falls back to CPU automatically
+
+## Security
+
+It is recommended to use [safe-chain](https://github.com/AikidoSec/safe-chain) to protect against supply chain attacks when running install scripts.
+
+**Linux/macOS:**
+```bash
+curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+iex (iwr "https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.ps1" -UseBasicParsing)
+```
 
 ## Installation
 
@@ -76,3 +90,7 @@ Detailed reference material lives in [`references/`](references/):
 | [`experiment-log-schema.md`](references/experiment-log-schema.md) | Full `experiment_log.tsv` field definitions, lineage rules, log helper |
 | [`frontier-management.md`](references/frontier-management.md) | Frontier admission criteria, eviction, size cap, TSV tracking |
 | [`huggingface-finetuning.md`](references/huggingface-finetuning.md) | HuggingFace `Trainer` API patterns and configuration |
+
+## Original Repository
+
+This skill is based on [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
